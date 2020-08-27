@@ -94,6 +94,46 @@ class QueryAndGroup(nn.Module):
                     ), 'Cannot have not features and not use xyz as a feature!'
             new_features = grouped_xyz
 
+        # 2020/8/27 update: add edge enhancement
+        # initilize the center based on grouped_xyz:(B,point_num,3,sample_num,1)
+        EDGE_ENH = True
+        if EDGE_ENH:
+            batch_size, point_num, _, sample_num,_ = grouped_xyz.size()
+            edge_weight = torch.zeros(batch_size,point_num,sample_num)
+            LAMBDA = 0.5
+            for b in range(batch_size):
+                for p in range(point_num):
+                    # for each batch and each region
+                    center = center_xyz[b,p,:].view(3,1).contiguous()
+                    # remove duplicates
+                    uniq_idx = torch.unique(idx[b,p,:])
+                    uniq_num = uniq_idx.size(0)
+                    # handle the first point
+                    point_sel = grouped_xyz[b,p,:,0]
+                    point_clst = grouped_xyz[b,p,:,1:uniq_num].squeeze(-1)
+                    offset = torch.norm(point_sel-center,dim=0)
+                    dist = torch.norm(point_clst-point_sel,dim=0)
+                    if dist.size(0)>1:
+                        dist = torch.min(dist) 
+                    edge_weight[b,p,0] = offset-LAMBDA*dist
+                    edge_weight[b,p,uniq_num:sample_num+1] = offset-LAMBDA*dist
+                    for pt in range(1,uniq_num):
+                        point_clst = (torch.cat([grouped_xyz[b,p,:,:pt],grouped_xyz[b,p,:,pt+1:]],dim=1)).squeeze(-1)
+                        point_sel = grouped_xyz[b,p,:,pt]
+                        offset = torch.norm(point_sel-center)
+                        dist = torch.norm(point_clst-point_sel,dim=0)
+                        if dist.size(0)>1:
+                            dist = torch.min(dist) 
+                        edge_weight[b,p,pt] = offset-LAMBDA*dist
+                    #normalization
+                    edge_weight[b,p,:]-= torch.min(edge_weight[b,p,:])
+                    edge_weight[b,p,:]/= (torch.max(edge_weight[b,p,:])-torch.min(edge_weight[b,p,:]))
+                    edge_weight[b,p,:]+=0.1
+        # output size (B,npoint,sample_num)
+        edge_weights = torch.cat(new_features.size(1)*[edge_weight.unsqueeze(1)],dim=1)
+        # (B,C,npoints,nsample)
+        new_features = new_features.mul(edge_weights.cuda())
+        
         ret = [new_features]
         if self.return_grouped_xyz:
             ret.append(grouped_xyz)
